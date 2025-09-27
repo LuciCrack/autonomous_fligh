@@ -10,10 +10,11 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(PostStartup, state_recon)
         .add_systems(Update, (
-                move_drone_system.run_if(in_state(Phase::Recon)),
-                update_quads,
+                drone_route_recon.run_if(in_state(Phase::Recon)),
+                drone_route_flight.run_if(in_state(Phase::Flight)),
         ))
         .add_systems(OnEnter(Phase::Recon), recon)
+        .add_systems(OnEnter(Phase::Flight), flight)
         .run();
 }
 
@@ -25,6 +26,7 @@ struct Textures {
     drone: Handle<Image>,
     grey_border: Handle<Image>,
     blue_border: Handle<Image>,
+    checkmark: Handle<Image>,
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug, Default, States)]
@@ -33,9 +35,13 @@ enum Phase {
     Setup,
     Recon,
     Flight,
+    Done,
 }
 
 const TILE_SIZE: f32 = 20.0; // px
+// Map size
+const WIDTH: usize = 60;
+const HEIGHT: usize = 30;
 
 fn setup(
     mut commands: Commands,
@@ -49,21 +55,19 @@ fn setup(
         drone: asset_server.load("drone.png"),
         grey_border: asset_server.load("grey_border.png"),
         blue_border: asset_server.load("blue_border.png"),
+        checkmark: asset_server.load("checkmark.png"),
     };
 
-    let width = 60;
-    let height = 30;
-
     // generar mapa procedural
-    let map = generate_coast_map(width, height);
+    let map = generate_coast_map(WIDTH, HEIGHT);
                            
     commands.spawn(( // Spawn camera in the center
             Camera2d,
-            Transform::from_xyz(width as f32 / 2.0 * TILE_SIZE, height as f32 / 2.0 * TILE_SIZE, 10.)
+            Transform::from_xyz(WIDTH as f32 / 2.0 * TILE_SIZE, HEIGHT as f32 / 2.0 * TILE_SIZE, 10.)
     ));
 
-    for x in 0..width {
-        for y in 0..height {
+    for x in 0..WIDTH {
+        for y in 0..HEIGHT {
             // Seleccionar textura
             let tile_type = get_tile_type(&map, x, y);
             let texture = match tile_type {
@@ -97,11 +101,11 @@ fn setup(
             ..default()
         },
         Transform {
-            translation: Vec3::new(TILE_SIZE, (height as f32 * TILE_SIZE) - (2.0 * TILE_SIZE), 2.0),
+            translation: Vec3::new(TILE_SIZE, (HEIGHT as f32 * TILE_SIZE) - (2.0 * TILE_SIZE), 2.0),
             scale: Vec3::splat(TILE_SIZE * 1.8 / 128.0),
             ..Default::default()
         },
-        Drone::init_with_pos(1, height - 2),
+        Drone::init_with_pos(1, HEIGHT - 2),
     ));
 
     commands.insert_resource(textures);
@@ -114,9 +118,11 @@ fn state_recon(mut next_state: ResMut<NextState<Phase>>) {
     next_state.set(Phase::Recon);
 }
 
-fn move_drone_system(
+fn drone_route_recon(
     time: Res<Time>,
-    mut targets: ResMut<ReconTargets>,
+    textures: Res<Textures>,
+    mut targets: ResMut<Targets>,
+    mut water_quads: ResMut<Quadrants>,
     mut query: Query<(&mut Drone, &mut Transform)>,
     mut next_state: ResMut<NextState<Phase>>,
     mut commands: Commands,
@@ -124,33 +130,120 @@ fn move_drone_system(
     // Mueve el dron hacia el target
     // Con una velocidad de drone.speed = 10px / sec
     for (mut drone, mut transform) in &mut query {
-        if let Some(target) = &drone.target {
-            let dir = target.quad.pos - drone.pos;
-            let dist = ops::sqrt((dir.x * dir.x) + (dir.y * dir.y));
+        // Move drone towards it's target, returning true if reached its target.
+        let in_range = drone.move_towards(&mut transform, time.delta_secs(), &targets.targets[0]);
 
-            if dist > 1.0 {
-                let step = drone.speed * time.delta_secs();
-                let movement = dir.normalize() * step.min(dist);
+        if in_range {
+            // Check quadrant and draw its border
+            if let Some(target) = &drone.target {
+                let quad = &target.quad;
+                let texture = match quad.kind {
+                    Tile::Water => {
+                        water_quads.q.push(quad.clone());
+                        textures.blue_border.clone()
+                    }, 
+                    _ => textures.grey_border.clone(),
+                };
 
-                // update logical pos
-                drone.pos += movement;
-                // update sprite
-                transform.translation.x = drone.pos.x as f32 * TILE_SIZE;
-                transform.translation.y = drone.pos.y as f32 * TILE_SIZE;
-            } else {
-                // TODO
-                // Target in range, next target 
-                if targets.current == targets.quads.len() {
-                    next_state.set(Phase::Flight);
-                    commands.remove_resource::<ReconTargets>();
-                    println!("Phase FLight!!");
-                    break;
-                }
-                drone.set_target(&targets.quads[targets.current]);
-                targets.current += 1;
+                commands.spawn((
+                    Sprite {
+                        image: texture,
+                        ..Default::default()
+                    },
+                    Transform {
+                        translation: Vec3::new((quad.pos.x - 0.5) * TILE_SIZE, (quad.pos.y - 0.5) * TILE_SIZE, 1.0),
+                        scale: Vec3::splat(TILE_SIZE / 128.0),
+                        ..Default::default()
+                    }
+                ));
             }
-        } else { // Shouldn't happen but just in case targets.is_none()
-            drone.set_target(&targets.quads[0]);
+
+            // If its the last quad in the recon phase, go to the next phase: flight!
+            if targets.current == targets.targets.len() {
+                next_state.set(Phase::Flight);
+                commands.remove_resource::<Targets>();
+                println!("Phase FLight!!");
+                break;
+            }
+
+            // Move to next target!  yes i hate myself
+            drone.set_target(&targets.targets[targets.current]);
+            targets.current += 1;
+        }
+    }
+}
+
+fn drone_route_flight(
+    time: Res<Time>,
+    textures: Res<Textures>,
+    mut commands: Commands,
+    mut targets: ResMut<Targets>,
+    mut query: Query<(&mut Drone, &mut Transform)>,
+    mut next_state: ResMut<NextState<Phase>>,
+) {
+    // Mueve el dron hacia el target
+    // Con una velocidad de drone.speed = 10px / sec
+    for (mut drone, mut transform) in &mut query {
+        let in_range;
+        match drone.moving {
+            Moving::ToBase => in_range = drone.move_towards_base(&mut transform, time.delta_secs()),
+            Moving::ToQuad => in_range = drone.move_towards(&mut transform, time.delta_secs(), &targets.targets[0]),
+        }
+
+        if in_range {
+            // If its the last quad in the flight phase, DONE!
+            if targets.current == targets.targets.len() && drone.moving == Moving::ToQuad {
+                if let Some(target) = &drone.target {
+                    let quad = &target.quad;
+                    commands.spawn((
+                        Sprite {
+                            image: textures.checkmark.clone(),
+                            ..Default::default()
+                        },
+                        Transform {
+                            translation: Vec3::new((quad.pos.x - 0.5) * TILE_SIZE, (quad.pos.y - 0.5) * TILE_SIZE, 1.0),
+                            scale: Vec3::splat(TILE_SIZE / 128.0),
+                            ..Default::default()
+                        }
+                    ));
+                }
+
+                next_state.set(Phase::Done);
+                commands.remove_resource::<Targets>();
+                println!("FINISHED DRONE ROUTE");
+                break;
+            }
+
+            match drone.moving {
+                Moving::ToBase => {
+                    if targets.current > 1 {
+                        if let Some(target) = &drone.target {
+                            let quad = &target.quad;
+                            commands.spawn((
+                                Sprite {
+                                    image: textures.checkmark.clone(),
+                                    ..Default::default()
+                                },
+                                Transform {
+                                    translation: Vec3::new((quad.pos.x - 0.5) * TILE_SIZE, (quad.pos.y - 0.5) * TILE_SIZE, 1.0),
+                                    scale: Vec3::splat(TILE_SIZE / 128.0),
+                                    ..Default::default()
+                                }
+                            ));
+                        }
+                    }
+
+                    // Move to next target!  yes i hate myself
+                    if targets.current != targets.targets.len() {
+                        drone.set_target(&targets.targets[targets.current]);
+
+                        drone.moving = Moving::ToQuad;
+                    }
+                }, Moving::ToQuad => {
+                    drone.moving = Moving::ToBase;
+                    targets.current += 1;
+                },
+            }
         }
     }
 }
@@ -158,49 +251,18 @@ fn move_drone_system(
 fn recon(
     map: Res<Map>,
     mut commands: Commands,
-    textures: Res<Textures>,
 ) {
     let quads = reconnaissance(&map);
     println!("Reconocimiento completado, se mapearon {} cuadrantes", quads.len());
 
-    for quad in quads.iter() {
-        match quad.kind {
-            Tile::Land => {
-                commands.spawn((
-                        Sprite {
-                            image: textures.grey_border.clone(),
-                            ..Default::default()
-                        },
-                        Transform {
-                            translation: Vec3::new((quad.pos.x - 0.5) * TILE_SIZE, (quad.pos.y - 0.5) * TILE_SIZE, 1.0),
-                            scale: Vec3::splat(TILE_SIZE / 128.0),
-                            ..Default::default()
-                        }
-                ));
-            },
-            Tile::Water => {
-                commands.spawn((
-                        Sprite {
-                            image: textures.blue_border.clone(),
-                            ..Default::default()
-                        },
-                        Transform {
-                            translation: Vec3::new((quad.pos.x - 0.5) * TILE_SIZE, (quad.pos.y - 0.5) * TILE_SIZE, 1.0),
-                            scale: Vec3::splat(TILE_SIZE / 128.0),
-                            ..Default::default()
-                        }
-                ));
-            },
-            _ => (),
-        };
-    }
+    let targets = target_vector(quads);
+    let recon_targets = Targets { targets , current: 0 };
 
-    let targets = target_vector(quads.clone());
-
-    let recon_targets = ReconTargets { quads: targets , current: 0 };
-
-    commands.insert_resource(Quadrants { q: quads } );
+    // commands.insert_resource(Quadrants { q: quads } );
     commands.insert_resource(recon_targets);
+
+    let water_quads: Quadrants = Quadrants { q: vec![] };
+    commands.insert_resource(water_quads);
 
     /*
     let targets = water_targets(&quadrants);
@@ -210,9 +272,14 @@ fn recon(
     */
 }
 
-fn update_quads(
-    mut quads: ResMut<Quadrants>,
+fn flight(
+    water_targets: Res<Quadrants>,
+    mut commands: Commands,
 ) {
-    // Update quads when they are found and then done
+    let targets = target_vector(water_targets.q.clone());
+    println!("Fase de reconocimiento completada, se encontraron {} cuadrantes para medir", targets.len());
 
+    let flight_targets = Targets { targets, current: 0 };
+    commands.insert_resource(flight_targets);
 }
+

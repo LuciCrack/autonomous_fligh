@@ -1,10 +1,11 @@
 use bevy::prelude::*;
+use crate::{TILE_SIZE, HEIGHT};
 
 // Constante que define el tamaño de cada cuadrante en metros
 const QUADRANT_SIZE: f32 = 10.0; // meters
 // Not used for now but might be usefull later :D
-// const BASE: Vec2 = Vec2::new(0.0, 0.0);
-const SPEED: f32 = 10.0;
+const BASE: Vec2 = Vec2::new(1.0, HEIGHT as f32 - 2.0);
+const SPEED: f32 = 20.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tile {
@@ -13,29 +14,22 @@ pub enum Tile {
     Base,
 }
 
-#[derive(Clone, Debug)]
-pub enum QuadState {
-    NotFound,
-    Found(Tile),
-    Done,
+#[derive(Debug, Resource, PartialEq)]
+pub enum Moving {
+    ToBase,
+    ToQuad,
 }
 
 #[derive(Debug, Clone)]
 pub struct Quadrant {
     pub pos: Vec2,
     pub kind: Tile,
-    pub quad_state: QuadState,
 }
 
 #[derive(Resource)]
-pub struct Quadrants {
+pub struct Quadrants { // This is really just a wrapper around a vector of Quadrants so we can use
+                       // the derive(Resourse) 
     pub q: Vec<Quadrant>,
-}
-
-#[derive(Debug, Resource)]
-pub struct ReconTargets { // List of Targets for the Recon Phase
-    pub quads: Vec<Target>,
-    pub current: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -51,12 +45,11 @@ pub fn target_vector(quads: Vec<Quadrant>) -> Vec<Target> {
     targets
 }
 
-/*
 #[derive(Resource)]
-pub struct Targets { // List of targets for the Fligh Phase
-    pub target_list: Vec<Target>,
+pub struct Targets { // List of targets
+    pub targets: Vec<Target>,
+    pub current: usize,
 }
-*/
 
 pub fn reconnaissance(map: &Map) -> Vec<Quadrant> {
     let width = map.tiles.len();
@@ -71,9 +64,8 @@ pub fn reconnaissance(map: &Map) -> Vec<Quadrant> {
         for y in 0..quad_y as usize {
             let kind = evaluate_quadrant(map, x, y);
             quads.push(Quadrant { 
-                pos: Vec2::new(x as f32 * QUADRANT_SIZE + (QUADRANT_SIZE / 2.0), y as f32 * QUADRANT_SIZE + (QUADRANT_SIZE / 2.0)), 
-                kind, 
-                quad_state: QuadState::NotFound,
+                pos: Vec2::new(x as f32 * QUADRANT_SIZE + (QUADRANT_SIZE / 2.0), y as f32 * QUADRANT_SIZE + (QUADRANT_SIZE / 2.0)),
+                kind,
             });
         }
     }
@@ -102,10 +94,63 @@ pub struct Drone {
     pub pos: Vec2,
     pub target: Option<Target>,
     pub speed: f32,
+    pub moving: Moving,
     // battery: f32,
 }
 
 impl Drone {
+    // Move drone cleanly towards its target
+    // Return true if its in range
+    pub fn move_towards(&mut self, transform: &mut Transform, delta_secs: f32, target_default: &Target) -> bool {
+        if let Some(target) = &self.target {
+            let dir = target.quad.pos - self.pos;
+            let dist = ops::sqrt((dir.x * dir.x) + (dir.y * dir.y));
+
+            if dist > 1.0 {
+                let step = self.speed * delta_secs;
+                let movement = dir.normalize() * step.min(dist);
+
+                // update logical pos
+                self.pos += movement;
+                // update sprite
+                transform.translation.x = self.pos.x as f32 * TILE_SIZE;
+                transform.translation.y = self.pos.y as f32 * TILE_SIZE;
+
+                // Drone not in range of it's target
+                false
+            } else {
+                // Drone within 1.0 unit distance of its target!!
+                true
+            }
+        } else {
+            self.set_target(target_default);
+            false
+        }
+    }
+
+    pub fn move_towards_base(&mut self, transform: &mut Transform, delta_secs: f32) -> bool {
+        let dir = BASE - self.pos;
+        let dist = ops::sqrt((dir.x * dir.x) + (dir.y * dir.y));
+
+        if dist > 1.0 {
+            let step = self.speed * delta_secs;
+            let movement = dir.normalize() * step.min(dist);
+
+            // update logical pos
+            self.pos += movement;
+            // update sprite
+            transform.translation.x = self.pos.x as f32 * TILE_SIZE;
+            transform.translation.y = self.pos.y as f32 * TILE_SIZE;
+
+            // Drone not in range of it's target
+            false
+        } else {
+            // Drone within 1.0 unit distance of its target!!
+            true
+        }
+
+    }            
+
     /*
     pub fn init() -> Drone {
         Drone {
@@ -121,6 +166,7 @@ impl Drone {
             pos: Vec2::new(x as f32, y as f32),
             target: None,
             speed: SPEED,
+            moving: Moving::ToQuad,
         }
     }
 
