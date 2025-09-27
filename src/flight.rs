@@ -13,65 +13,100 @@ pub enum Tile {
     Base,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
+pub enum QuadState {
+    NotFound,
+    Found(Tile),
+    Done,
+}
+
+#[derive(Debug, Clone)]
 pub struct Quadrant {
-    qx: f32,
-    qy: f32,
-    kind: Tile,
-    done: bool,
+    pub pos: Vec2,
+    pub kind: Tile,
+    pub quad_state: QuadState,
 }
 
 #[derive(Resource)]
-pub struct Targets {
-    pub positions: Vec<Vec2>,
+pub struct Quadrants {
+    pub q: Vec<Quadrant>,
 }
 
+#[derive(Debug, Resource)]
+pub struct ReconTargets { // List of Targets for the Recon Phase
+    pub quads: Vec<Target>,
+    pub current: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct Target { // General Target Object
+    pub quad: Quadrant,
+}
+
+pub fn target_vector(quads: Vec<Quadrant>) -> Vec<Target> {
+    let mut targets: Vec<Target> = vec![];
+    for quad in quads {
+        targets.push(Target { quad });
+    }
+    targets
+}
+
+/*
+#[derive(Resource)]
+pub struct Targets { // List of targets for the Fligh Phase
+    pub target_list: Vec<Target>,
+}
+*/
+
 pub fn reconnaissance(map: &Map) -> Vec<Quadrant> {
-    let width = map.tiles[0].len();
-    let height = map.tiles.len();
+    let width = map.tiles.len();
+    let height = map.tiles[0].len();
 
-    let quad_x = width / QUADRANT_SIZE as usize;
-    let quad_y = height / QUADRANT_SIZE as usize;
+    let quad_x = width as f32 / QUADRANT_SIZE;
+    let quad_y = height as f32 / QUADRANT_SIZE;
 
-    let mut quadrants = vec![];
+    let mut quads = vec![];
 
-    for y in 0..quad_y {
-        for x in 0..quad_x {
+    for x in 0..quad_x as usize {
+        for y in 0..quad_y as usize {
             let kind = evaluate_quadrant(map, x, y);
-            quadrants.push(Quadrant { qx: x as f32, qy: y as f32, kind, done: false });
+            quads.push(Quadrant { 
+                pos: Vec2::new(x as f32 * QUADRANT_SIZE + (QUADRANT_SIZE / 2.0), y as f32 * QUADRANT_SIZE + (QUADRANT_SIZE / 2.0)), 
+                kind, 
+                quad_state: QuadState::NotFound,
+            });
         }
     }
 
-    quadrants
+    quads
 }
 
+/*
 pub fn water_targets(quadrants: &Vec<Quadrant>) -> Targets {
     let mut targets = vec![];
 
-    for q in quadrants {
+    for q in quadrants.iter() {
         if q.kind == Tile::Water {
-            let center_x = q.qx * QUADRANT_SIZE + QUADRANT_SIZE / 2.0;
-            let center_y = q.qy * QUADRANT_SIZE + QUADRANT_SIZE / 2.0;
-
-            targets.push(Vec2::new(center_x, center_y));
+            targets.push(Target { quad: q.clone() });
         }
     }
 
     Targets {
-        positions: targets
+        target_list: targets
     }
 }
-
+*/
 
 #[derive(Debug, Component)]
 pub struct Drone {
     pub pos: Vec2,
-    pub target: Option<Vec2>,
+    pub target: Option<Target>,
     pub speed: f32,
     // battery: f32,
 }
 
 impl Drone {
+    /*
     pub fn init() -> Drone {
         Drone {
             pos: Vec2::new(0.0, 0.0),
@@ -80,12 +115,17 @@ impl Drone {
             // battery: 100.0,
         }
     }
+    */
     pub fn init_with_pos(x: usize, y: usize) -> Drone {
         Drone {
             pos: Vec2::new(x as f32, y as f32),
             target: None,
             speed: SPEED,
         }
+    }
+
+    pub fn set_target(&mut self, target: &Target) {
+        self.target = Some(target.clone());
     }
     /*
     fn move_to(&mut self, x: usize, y: usize) {
@@ -137,26 +177,28 @@ pub struct Map {
 }
 
 pub fn generate_coast_map(width: usize, height: usize) -> Map {
+    // Procedural map generation using Perlin Noise :D
     use noise::{NoiseFn, Perlin};
 
     let perlin = Perlin::new(rand::random::<u32>()); // seed = 0
-    let mut map = vec![vec![Tile::Water; width]; height];
 
-    for y in 0..height {
-        for x in 0..width {
+    let mut map = vec![vec![Tile::Water; height]; width]; // Inicia mapa lleno de agua
+
+    for x in 0..width {
+        for y in 0..height {
             let nx = x as f64 / width as f64;
             let ny = y as f64 / height as f64; 
-            let gradient = nx; // Gradiente: 0.0 arriba, 1.0 abajo 
+            let gradient = ny; // Gradiente: 0.0 arriba, 1.0 abajo 
             let val = perlin.get([nx * 3.0, ny * 3.0]) + (gradient * 2.0 - 1.0);// este número controla el detalle
                                                                                 // > detalle, islas + grandes
 
             //                   0.4 da más agua :D
             //                   0.0 es        50     &         50
-            map[y][x] = if val > 0.4 { Tile::Land } else { Tile::Water };
+            map[x][y] = if val > 0.4 { Tile::Land } else { Tile::Water };
         }
     }
 
-    map[1][width - 2] = Tile::Base;
+    map[1][height - 2] = Tile::Base;
     Map { tiles: map }
 }
 
@@ -177,6 +219,7 @@ fn simulate(mut drone: Drone, map: &Vec<Vec<Tile>>) {
     drone.move_to(0, 0);
 }
 */
+/*
 pub fn autonomous_flight(drone: &mut Drone, targets: &Targets) {
 
     /*
@@ -197,15 +240,15 @@ pub fn autonomous_flight(drone: &mut Drone, targets: &Targets) {
     println!("🎉 Misión completada");
     */
 }
-
+*/
 fn evaluate_quadrant(map: &Map, qx: usize, qy: usize) -> Tile {
     let mut land_count = 0;
     let mut total = 0;
 
-    for y in (qy * QUADRANT_SIZE as usize)..((qy+1) * QUADRANT_SIZE as usize) {
-        for x in (qx * QUADRANT_SIZE as usize)..((qx+1) * QUADRANT_SIZE as usize) {
+    for x in (qx * QUADRANT_SIZE as usize)..((qx+1) * QUADRANT_SIZE as usize) {
+        for y in (qy * QUADRANT_SIZE as usize)..((qy+1) * QUADRANT_SIZE as usize) {
             total += 1;
-            if map.tiles[y][x] == Tile::Land {
+            if map.tiles[x][y] == Tile::Land {
                 land_count += 1;
             }
         }

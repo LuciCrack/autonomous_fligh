@@ -8,10 +8,12 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .init_state::<Phase>()
         .add_systems(Startup, setup)
-        .add_systems(Update, move_drone_system)
         .add_systems(PostStartup, state_recon)
+        .add_systems(Update, (
+                move_drone_system.run_if(in_state(Phase::Recon)),
+                update_quads,
+        ))
         .add_systems(OnEnter(Phase::Recon), recon)
-        .add_systems(OnEnter(Phase::Flight), autonomous)
         .run();
 }
 
@@ -19,9 +21,10 @@ fn main() {
 struct Textures {
     land: Handle<Image>,
     water: Handle<Image>,
-    water_marked: Handle<Image>,
     base: Handle<Image>,
     drone: Handle<Image>,
+    grey_border: Handle<Image>,
+    blue_border: Handle<Image>,
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug, Default, States)]
@@ -42,24 +45,25 @@ fn setup(
     let textures = Textures {
         land: asset_server.load("land_tile.png"),
         water: asset_server.load("water_tile.png"),
-        water_marked: asset_server.load("water_tile_2.png"),
         base: asset_server.load("base_tile.png"),
         drone: asset_server.load("drone.png"),
+        grey_border: asset_server.load("grey_border.png"),
+        blue_border: asset_server.load("blue_border.png"),
     };
 
-    let width = 32;
-    let height = 60;
+    let width = 60;
+    let height = 30;
 
-    // generar mapa procedural (puedes usar generate_coast_map con ruido)
+    // generar mapa procedural
     let map = generate_coast_map(width, height);
                            
     commands.spawn(( // Spawn camera in the center
             Camera2d,
-            Transform::from_xyz(height as f32 / 2.0 * TILE_SIZE, width as f32 / 2.0 * TILE_SIZE, 10.)
+            Transform::from_xyz(width as f32 / 2.0 * TILE_SIZE, height as f32 / 2.0 * TILE_SIZE, 10.)
     ));
 
-    for x in 0..height {
-        for y in 0..width {
+    for x in 0..width {
+        for y in 0..height {
             // Seleccionar textura
             let tile_type = get_tile_type(&map, x, y);
             let texture = match tile_type {
@@ -93,11 +97,11 @@ fn setup(
             ..default()
         },
         Transform {
-            translation: Vec3::new(TILE_SIZE, (width as f32 * TILE_SIZE) - (2.0 * TILE_SIZE), 2.0),
+            translation: Vec3::new(TILE_SIZE, (height as f32 * TILE_SIZE) - (2.0 * TILE_SIZE), 2.0),
             scale: Vec3::splat(TILE_SIZE * 1.8 / 128.0),
             ..Default::default()
         },
-        Drone::init_with_pos(1, width - 2),
+        Drone::init_with_pos(1, height - 2),
     ));
 
     commands.insert_resource(textures);
@@ -106,18 +110,22 @@ fn setup(
 }
 
 fn state_recon(mut next_state: ResMut<NextState<Phase>>) {
+    // This happens when Startup is finished
     next_state.set(Phase::Recon);
 }
 
 fn move_drone_system(
     time: Res<Time>,
-    // TODO
-    // targets: Res<Targets>,
+    mut targets: ResMut<ReconTargets>,
     mut query: Query<(&mut Drone, &mut Transform)>,
+    mut next_state: ResMut<NextState<Phase>>,
+    mut commands: Commands,
 ) {
+    // Mueve el dron hacia el target
+    // Con una velocidad de drone.speed = 10px / sec
     for (mut drone, mut transform) in &mut query {
-        if let Some(target) = drone.target {
-            let dir = target - drone.pos;
+        if let Some(target) = &drone.target {
+            let dir = target.quad.pos - drone.pos;
             let dist = ops::sqrt((dir.x * dir.x) + (dir.y * dir.y));
 
             if dist > 1.0 {
@@ -130,18 +138,19 @@ fn move_drone_system(
                 transform.translation.x = drone.pos.x as f32 * TILE_SIZE;
                 transform.translation.y = drone.pos.y as f32 * TILE_SIZE;
             } else {
-                // reached target
-                drone.target = None;
+                // TODO
+                // Target in range, next target 
+                if targets.current == targets.quads.len() {
+                    next_state.set(Phase::Flight);
+                    commands.remove_resource::<ReconTargets>();
+                    println!("Phase FLight!!");
+                    break;
+                }
+                drone.set_target(&targets.quads[targets.current]);
+                targets.current += 1;
             }
-        } else {
-            // TODO: so I think all thats missing is making the drone move to each quadrant in the
-            // recon phase, making targets as it goes.
-            // Then make the drone move to each target coming back to the base.
-            // but idk how to schechule that so thats for tomorrow if I want lol
-            // drone.target = Some(next_target())
-            //
-            // For now I just like to see it move :D 
-            drone.target = Some(Vec2::new(5.0, 8.0));
+        } else { // Shouldn't happen but just in case targets.is_none()
+            drone.set_target(&targets.quads[0]);
         }
     }
 }
@@ -149,22 +158,61 @@ fn move_drone_system(
 fn recon(
     map: Res<Map>,
     mut commands: Commands,
+    textures: Res<Textures>,
 ) {
-    let quadrants = reconnaissance(&map);
-    println!("Reconocimiento completado, se mapearon {} cuadrantes", quadrants.len());
+    let quads = reconnaissance(&map);
+    println!("Reconocimiento completado, se mapearon {} cuadrantes", quads.len());
 
+    for quad in quads.iter() {
+        match quad.kind {
+            Tile::Land => {
+                commands.spawn((
+                        Sprite {
+                            image: textures.grey_border.clone(),
+                            ..Default::default()
+                        },
+                        Transform {
+                            translation: Vec3::new((quad.pos.x - 0.5) * TILE_SIZE, (quad.pos.y - 0.5) * TILE_SIZE, 1.0),
+                            scale: Vec3::splat(TILE_SIZE / 128.0),
+                            ..Default::default()
+                        }
+                ));
+            },
+            Tile::Water => {
+                commands.spawn((
+                        Sprite {
+                            image: textures.blue_border.clone(),
+                            ..Default::default()
+                        },
+                        Transform {
+                            translation: Vec3::new((quad.pos.x - 0.5) * TILE_SIZE, (quad.pos.y - 0.5) * TILE_SIZE, 1.0),
+                            scale: Vec3::splat(TILE_SIZE / 128.0),
+                            ..Default::default()
+                        }
+                ));
+            },
+            _ => (),
+        };
+    }
+
+    let targets = target_vector(quads.clone());
+
+    let recon_targets = ReconTargets { quads: targets , current: 0 };
+
+    commands.insert_resource(Quadrants { q: quads } );
+    commands.insert_resource(recon_targets);
+
+    /*
     let targets = water_targets(&quadrants);
     println!("Se encontraron {} cuadrantes de agua", targets.positions.len());
 
     commands.insert_resource(targets);
+    */
 }
 
-fn autonomous(
-    mut query: Query<&mut Drone>,
-    targets: Res<Targets>,
+fn update_quads(
+    mut quads: ResMut<Quadrants>,
 ) {
-    for mut drone in query.iter_mut() {
-        autonomous_flight(&mut drone, &*targets);
-    }
-}
+    // Update quads when they are found and then done
 
+}
