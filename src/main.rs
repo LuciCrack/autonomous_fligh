@@ -8,8 +8,9 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .init_state::<Phase>()
         .add_systems(Startup, setup)
-        .add_systems(PostStartup, state_recon)
+        .add_systems(PostStartup, state_waiting)
         .add_systems(Update, (
+                waiting.run_if(in_state(Phase::Waiting)),
                 drone_route_recon.run_if(in_state(Phase::Recon)),
                 drone_route_flight.run_if(in_state(Phase::Flight)),
         ))
@@ -33,6 +34,7 @@ struct Textures {
 enum Phase {
     #[default]
     Setup,
+    Waiting,
     Recon,
     Flight,
     Done,
@@ -113,9 +115,19 @@ fn setup(
     commands.insert_resource(map);
 }
 
-fn state_recon(mut next_state: ResMut<NextState<Phase>>) {
-    // This happens when Startup is finished
-    next_state.set(Phase::Recon);
+fn state_waiting(
+    mut next_state: ResMut<NextState<Phase>>,
+) { 
+    next_state.set(Phase::Waiting);
+}
+
+fn waiting(
+    mut next_state: ResMut<NextState<Phase>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+) {
+    if keyboard.just_pressed(KeyCode::Space) {
+        next_state.set(Phase::Recon);
+    }
 }
 
 fn drone_route_recon(

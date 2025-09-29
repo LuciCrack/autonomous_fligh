@@ -5,7 +5,7 @@ use crate::{TILE_SIZE, HEIGHT};
 const QUADRANT_SIZE: f32 = 10.0; // meters
 // Not used for now but might be usefull later :D
 const BASE: Vec2 = Vec2::new(1.0, HEIGHT as f32 - 2.0);
-const SPEED: f32 = 20.0;
+const SPEED: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tile {
